@@ -103,7 +103,11 @@ def check_claim(claimed: dict[str, float], rerun: dict[str, float], tolerance_pc
         if claimed_value is None:
             continue
         benchmark = BENCHMARKS.get(key)
-        tolerance = tolerance_pct if benchmark is None or benchmark.claim_tolerance_pct is None else benchmark.claim_tolerance_pct
+        tolerance = (
+            tolerance_pct
+            if benchmark is None or benchmark.claim_tolerance_pct is None
+            else benchmark.claim_tolerance_pct
+        )
         if abs(claimed_value - rerun_value) * 100.0 > tolerance:
             mismatches.append(key)
     return mismatches
@@ -197,6 +201,32 @@ def check_tdx_signature(attestation: dict | None, pccs_url: str | None = None) -
     return verify_tdx_quote(attestation["tdx"].get("quote_b64") or "", pccs_url)
 
 
+def _attestation_auth_issues(bundle_dir: Path, gpu_signature: dict | None) -> list[str]:
+    """Reasons a submitted attestation fails cryptographic authentication.
+
+    Enforced from the signature-verified token payloads (`gpu_signature`), never the
+    miner-supplied `claims` blob: a real attestation must carry an NRAS-signed GPU
+    token whose *verified* `eat_nonce` equals this bundle's `claim_sha256`. This is
+    what makes "a hand-crafted attestation JSON fails" (docs/miner-guide.md) true, and
+    it also defeats replaying a genuine token from another run against a new bundle.
+    Returns [] when the attestation authenticates.
+    """
+    if gpu_signature is None:
+        return ["attestation carries no NRAS-signed GPU token to authenticate"]
+    if not gpu_signature.get("verified"):
+        return list(gpu_signature.get("issues") or ["GPU attestation signature did not verify"])
+    from proof.bundle import claim_sha256
+
+    expected = claim_sha256(bundle_dir)
+    verified_nonces = {str(nonce).lower().removeprefix("0x") for nonce in (gpu_signature.get("eat_nonces") or [])}
+    if expected not in verified_nonces:
+        return [
+            "GPU attestation is not cryptographically bound to this bundle "
+            "(no signature-verified eat_nonce matches claim_sha256)"
+        ]
+    return []
+
+
 def check_checkpoint_manifest(manifest: dict, checkpoint_path: Path) -> bool | None:
     """Compare a local checkpoint against the bundle's per-file sha256 manifest.
 
@@ -242,8 +272,7 @@ def verify_submission(
                 "verified": False,
                 "reason": "checkpoint_required",
                 "issues": [
-                    "proof-only bundle: reproduce the checkpoint from the recipe + dataset "
-                    "and pass it via --checkpoint"
+                    "proof-only bundle: reproduce the checkpoint from the recipe + dataset and pass it via --checkpoint"
                 ],
                 "label": "eval:REJECT",
                 "run_id": manifest.get("run_id"),
@@ -251,7 +280,12 @@ def verify_submission(
         checkpoint_path = checkpoint
 
     if attestation is not None and not attestation.get("passed"):
-        return {"verified": False, "reason": "attestation_failed", "label": "eval:REJECT", "run_id": manifest.get("run_id")}
+        return {
+            "verified": False,
+            "reason": "attestation_failed",
+            "label": "eval:REJECT",
+            "run_id": manifest.get("run_id"),
+        }
 
     training_issues = check_training_claims(manifest, attestation)
     if training_issues:
@@ -309,6 +343,22 @@ def verify_submission(
     report["tdx_bound"] = check_tdx_binding(bundle_dir, attestation)
     report["tdx_signature"] = check_tdx_signature(attestation)
     report["checkpoint_hash_match"] = check_checkpoint_manifest(manifest, checkpoint_path)
+
+    # A submitted attestation must be ENFORCED, not merely recorded: it has to be
+    # genuinely NRAS-signed and cryptographically bound to this bundle. Otherwise a
+    # hand-crafted attestation.json with passed=true (or a real token replayed from
+    # another run) would be trusted on the miner's word. Unattested bundles
+    # (attestation is None) are unaffected — GPU signature binding is the minimum bar.
+    if attestation is not None:
+        auth_issues = _attestation_auth_issues(bundle_dir, report["gpu_signature"])
+        if auth_issues:
+            return {
+                "verified": False,
+                "reason": "attestation_unverified",
+                "issues": auth_issues,
+                "label": "eval:REJECT",
+                "run_id": manifest.get("run_id"),
+            }
     return report
 
 
@@ -325,7 +375,9 @@ def _resolve_bundle_dir(bundle_repo: str | None, bundle_path: Path | None) -> Pa
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--bundle-repo", default=None, help="HF hub repo id to download the proof bundle from")
-    parser.add_argument("--bundle-path", type=Path, default=None, help="local bundle dir (alternative to --bundle-repo)")
+    parser.add_argument(
+        "--bundle-path", type=Path, default=None, help="local bundle dir (alternative to --bundle-repo)"
+    )
     parser.add_argument(
         "--frontier",
         type=Path,
