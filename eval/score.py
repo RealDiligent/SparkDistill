@@ -25,9 +25,19 @@ _TIER_BANDS = [
 ]
 
 
-def _pct_delta(candidate: float, frontier: float) -> float:
-    if frontier == 0:
-        return 0.0 if candidate == 0 else float("inf")
+def _pct_delta(candidate: float, frontier: float) -> float | None:
+    """Percent improvement of `candidate` over `frontier`, or None when unscoreable.
+
+    A non-positive frontier has no meaningful percentage baseline: returning a
+    finite ratio (or +inf) here would mint a spurious tier from a single benchmark
+    whose frontier has not been established yet — e.g. AIME24/GPQA sit at 0.0 for a
+    small student, so the first candidate to land any non-zero score would jump to
+    +inf and be tiered `XL` (max emission) for essentially no improvement, while also
+    writing the non-finite token `Infinity` (invalid JSON) into the run ledger. Such
+    a benchmark is still reported in `per_benchmark`, but excluded from tiering.
+    """
+    if frontier <= 0:
+        return None
     return (candidate - frontier) / frontier * 100.0
 
 
@@ -49,6 +59,8 @@ def score(candidate: dict[str, float], frontier: dict[str, float]) -> dict:
             continue
         pct = _pct_delta(candidate[key], frontier[key])
         per_benchmark[key] = {"candidate": candidate[key], "frontier": frontier[key], "pct_delta": pct}
+        if pct is None:
+            continue
         if pct > best_pct:
             best_pct, best_key = pct, key
         if pct < 0 and abs(pct) > benchmark.regression_floor_pct:
@@ -82,7 +94,9 @@ def main(argv: list[str] | None = None) -> int:
     report = score(candidate, frontier)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(report, indent=2))
+    # allow_nan=False: a non-finite delta must never silently reach report.json (and
+    # from there the immutable run ledger) as the non-standard `Infinity`/`NaN` token.
+    args.out.write_text(json.dumps(report, indent=2, allow_nan=False))
     print(f"{report['label']} (best: {report['best_benchmark']} {report['best_pct_delta']})", file=sys.stderr)
     return 0
 
