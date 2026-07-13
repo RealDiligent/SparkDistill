@@ -203,3 +203,43 @@ def test_verify_gpu_token_garbage_is_unverified():
 
     result = verify_gpu_token("not json")
     assert result["verified"] is False
+
+
+def test_verify_gpu_token_returns_signature_verified_nonces(monkeypatch):
+    # The content-binding nonce must come from the signature-verified payload, so a
+    # caller can bind the attestation to a bundle without trusting the miner's claims.
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    from eval.attestation import verify_gpu_token
+
+    key = ec.generate_private_key(ec.SECP384R1())
+    encode = lambda payload: jwt.encode(  # noqa: E731
+        payload, key, algorithm="ES384", headers={"kid": "nv-eat-kid-test"}
+    )
+    token = json.dumps(
+        [
+            ["JWT", jwt.encode({"sub": "overall"}, "k", algorithm="HS256")],
+            {
+                "REMOTE_GPU_CLAIMS": [
+                    ["JWT", encode({"iss": "https://nras.attestation.nvidia.com", "sub": "platform"})],
+                    {"GPU-0": encode({"iss": "https://nras.attestation.nvidia.com", "eat_nonce": "cafebabe"})},
+                ]
+            },
+        ]
+    )
+
+    class FakeKey:
+        def __init__(self, k):
+            self.key = k.public_key()
+
+    class FakeJWKClient:
+        def __init__(self, url):
+            pass
+
+        def get_signing_key_from_jwt(self, encoded):
+            return FakeKey(key)
+
+    monkeypatch.setattr(jwt, "PyJWKClient", FakeJWKClient)
+    result = verify_gpu_token(token)
+    assert result["verified"] is True
+    assert "cafebabe" in result["eat_nonces"]

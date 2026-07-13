@@ -165,7 +165,9 @@ def tdx_quote(nonce_hex: str, report_path: Path | None = None) -> dict | None:
     import base64
     import os
 
-    node = report_path or Path(os.environ.get("SPARKDISTILL_TSM_REPORT_PATH") or "/sys/kernel/config/tsm/report/sparkdistill")
+    node = report_path or Path(
+        os.environ.get("SPARKDISTILL_TSM_REPORT_PATH") or "/sys/kernel/config/tsm/report/sparkdistill"
+    )
     created = False
     try:
         if not node.is_dir():
@@ -201,12 +203,16 @@ def verify_gpu_token(token: str, jwks_url: str = DEFAULT_NRAS_JWKS_URL, issuer: 
     NOT counted as evidence. Without this check a validator would be trusting
     the committed attestation JSON on the miner's word.
 
-    Returns {"verified": bool, "tokens_checked": int, "issues": [...]}.
+    Returns {"verified": bool, "tokens_checked": int, "issues": [...],
+    "eat_nonces": [...]} — `eat_nonces` are the content-binding nonces read from the
+    *signature-verified* token payloads (not the unauthenticated `claims` blob), so a
+    caller can bind the attestation to a specific bundle without trusting miner text.
     """
     import jwt
 
     issues: list[str] = []
     checked = 0
+    verified_nonces: list[str] = []
     try:
         parsed = json.loads(token)
         client = jwt.PyJWKClient(jwks_url)
@@ -225,15 +231,23 @@ def verify_gpu_token(token: str, jwks_url: str = DEFAULT_NRAS_JWKS_URL, issuer: 
                     for name, encoded in signed_tokens:
                         try:
                             key = client.get_signing_key_from_jwt(encoded)
-                            jwt.decode(encoded, key.key, algorithms=["ES384"], issuer=issuer)
+                            payload = jwt.decode(encoded, key.key, algorithms=["ES384"], issuer=issuer)
                             checked += 1
+                            nonce = payload.get("eat_nonce")
+                            if nonce:
+                                verified_nonces.append(str(nonce))
                         except Exception as exc:
                             issues.append(f"{name}: {exc}")
     except Exception as exc:
         issues.append(f"token unparseable: {exc}")
     if checked == 0 and not issues:
         issues.append("no NRAS-signed tokens found in attestation")
-    return {"verified": checked > 0 and not issues, "tokens_checked": checked, "issues": issues}
+    return {
+        "verified": checked > 0 and not issues,
+        "tokens_checked": checked,
+        "issues": issues,
+        "eat_nonces": verified_nonces,
+    }
 
 
 def verify_tdx_quote(quote_b64: str, pccs_url: str | None = None) -> dict:

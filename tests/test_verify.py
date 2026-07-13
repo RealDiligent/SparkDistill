@@ -193,3 +193,75 @@ def test_gpu_signature_absent_without_token():
 
     assert check_gpu_signature(None) is None
     assert check_gpu_signature({"passed": True, "token": ""}) is None
+
+
+def _attested_bundle(tmp_path):
+    import json
+
+    bundle = tmp_path / "bundle"
+    (bundle / "checkpoint").mkdir(parents=True)
+    (bundle / "checkpoint" / "w.bin").write_text("w")
+    (bundle / "manifest.json").write_text(json.dumps({"run_id": "r1"}))
+    (bundle / "eval_scores.json").write_text(json.dumps({"scores": {"gsm8k": 0.6}}))
+    return bundle
+
+
+def test_fabricated_attestation_is_rejected(tmp_path, monkeypatch):
+    # A hand-crafted attestation.json (passed=true, bogus token) must NOT verify just
+    # because the checkpoint re-run happens to match — the signature is enforced.
+    import eval.verify as v
+
+    bundle = _attested_bundle(tmp_path)
+    monkeypatch.setattr(v, "run_harness", lambda *a, **k: {"gsm8k": 0.6})
+    monkeypatch.setattr(
+        v,
+        "check_gpu_signature",
+        lambda att: {
+            "verified": False,
+            "tokens_checked": 0,
+            "issues": ["no NRAS-signed tokens found"],
+            "eat_nonces": [],
+        },
+    )
+    attestation = {"passed": True, "token": '["JWT","forged"]', "claims": {"hwmodel": "GB202 RTX PRO 6000"}}
+    report = v.verify_submission(bundle, frontier={"gsm8k": 0.5}, attestation=attestation)
+    assert report["verified"] is False
+    assert report["reason"] == "attestation_unverified"
+
+
+def test_signed_but_unbound_attestation_is_rejected(tmp_path, monkeypatch):
+    # A genuinely NRAS-signed token whose verified nonce does not commit to THIS
+    # bundle (a replay from another run) must be rejected.
+    import eval.verify as v
+
+    bundle = _attested_bundle(tmp_path)
+    monkeypatch.setattr(v, "run_harness", lambda *a, **k: {"gsm8k": 0.6})
+    monkeypatch.setattr(
+        v,
+        "check_gpu_signature",
+        lambda att: {"verified": True, "tokens_checked": 1, "issues": [], "eat_nonces": ["ab" * 32]},
+    )
+    attestation = {"passed": True, "token": "t", "claims": {}}
+    report = v.verify_submission(bundle, frontier={"gsm8k": 0.5}, attestation=attestation)
+    assert report["verified"] is False
+    assert report["reason"] == "attestation_unverified"
+    assert any("bound" in issue for issue in report["issues"])
+
+
+def test_authentic_bound_attestation_passes(tmp_path, monkeypatch):
+    import eval.verify as v
+    from proof.bundle import claim_sha256
+
+    bundle = _attested_bundle(tmp_path)
+    digest = claim_sha256(bundle)
+    monkeypatch.setattr(v, "run_harness", lambda *a, **k: {"gsm8k": 0.6})
+    monkeypatch.setattr(
+        v,
+        "check_gpu_signature",
+        lambda att: {"verified": True, "tokens_checked": 1, "issues": [], "eat_nonces": [digest]},
+    )
+    attestation = {"passed": True, "token": "t", "claims": {}}
+    report = v.verify_submission(bundle, frontier={"gsm8k": 0.5}, attestation=attestation)
+    assert report["verified"] is True
+    assert report["label"] == "eval:XL"
+    assert report["gpu_signature"]["verified"] is True
