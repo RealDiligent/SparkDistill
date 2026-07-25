@@ -79,6 +79,18 @@ All notable changes to SparkDistill are documented here. The format follows
   never filled its architecture bucket. `record_merged_ledger_entry` now calls
   `apply_verified_report_to_frontiers` (and backfills the Hopper frontier from
   `2026-07-15-magicrails-hopper-v2`).
+- **A non-object `mix_manifest` in `datasets/canonical.json` no longer crashes the
+  training gate**: `sft_sha256_from_canonical_text` returns None for every other
+  unusable shape (invalid JSON, non-object payload, absent/null `mix_manifest`, short
+  digest), but `(payload.get("mix_manifest") or {}).get(...)` only guards a *falsy*
+  value — a list, string, or number there raised `AttributeError`. `_ALLOWED_ALWAYS`
+  lets a training-track PR change `datasets/canonical.json`, and
+  `_canonical_sft_sha256s_for_pr_window` runs every revision in the PR's pin-grace
+  window ([#121]) through that parser as the *first* step of `gate_training_pr`, so a
+  two-line file failed the `Training track gate` job with a traceback — no
+  `training:*` / `eval:*` label, no auto-close. Both `mix_manifest` readers in the
+  module now type-check it: the text parser returns None, and `canonical_sft_sha256`
+  raises the `ValueError` its callers already handle.
 
 ## [0.1.3] — 2026-07-21
 

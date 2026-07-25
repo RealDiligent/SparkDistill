@@ -31,7 +31,16 @@ def canonical_repo_id(path: Path = CANONICAL_PATH) -> str:
 
 
 def canonical_sft_sha256(path: Path = CANONICAL_PATH) -> str:
-    manifest = load_canonical(path).get("mix_manifest") or {}
+    """The pinned canonical sft_sha256, or ValueError when the pin is unusable.
+
+    `mix_manifest` is type-checked because `or {}` only covers a *falsy* value: a
+    list/string/number there reached `.get` and raised `AttributeError`, which callers
+    that catch this function's documented `ValueError` (`check_canonical_dataset_claim`,
+    `verify_remote_proof_bundle`, `validate_pr_body_canonical_pin`) do not handle.
+    """
+    manifest = load_canonical(path).get("mix_manifest")
+    if not isinstance(manifest, dict):
+        raise ValueError(f"{path} mix_manifest must be a JSON object")
     value = manifest.get("sft_sha256")
     if not isinstance(value, str) or len(value) != 64:
         raise ValueError(f"{path} mix_manifest.sft_sha256 must be a 64-char hex digest")
@@ -39,13 +48,28 @@ def canonical_sft_sha256(path: Path = CANONICAL_PATH) -> str:
 
 
 def sft_sha256_from_canonical_text(text: str) -> str | None:
+    """Read a pin out of an arbitrary `datasets/canonical.json` text, or None.
+
+    Every unusable shape must come back as None, because the text is
+    **miner-controlled**: `_ALLOWED_ALWAYS` lets a training-track PR change
+    `datasets/canonical.json`, and `_canonical_sft_sha256s_for_pr_window` feeds each
+    revision in the PR's grace window ([#121]) through here via `git show`. Invalid
+    JSON, a non-object payload, an absent or null `mix_manifest`, and a short digest all
+    returned None already, but a **non-dict** `mix_manifest` (list / string / number)
+    hit `.get` on it and raised `AttributeError` out of `gate_training_pr` — before any
+    validation ran — so a two-line canonical.json failed the `Training track gate` job
+    with a traceback instead of rejecting the PR.
+    """
     try:
         payload = json.loads(text)
     except json.JSONDecodeError:
         return None
     if not isinstance(payload, dict):
         return None
-    value = (payload.get("mix_manifest") or {}).get("sft_sha256")
+    manifest = payload.get("mix_manifest")
+    if not isinstance(manifest, dict):
+        return None
+    value = manifest.get("sft_sha256")
     if isinstance(value, str) and len(value) == 64:
         return value
     return None

@@ -1,13 +1,17 @@
 """Tests for eval.canonical_dataset and training_track_gate."""
 
+import json
 from pathlib import Path
 
+import pytest
 import yaml
 
 from eval.canonical_dataset import (
     CANONICAL_TRAINING_DATASET_PATH,
     assert_recipe_uses_canonical_dataset,
+    canonical_sft_sha256,
     load_canonical,
+    sft_sha256_from_canonical_text,
 )
 from eval.training_track_gate import (
     gate_training_pr,
@@ -133,3 +137,67 @@ def test_validate_recipe_paths_in_worktree(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr("eval.training_track_gate._git_show", _fake_show)
     assert validate_recipe_paths_in_ref("HEAD", ["recipes/demo/sft.yaml"]) == []
+
+
+# datasets/canonical.json is miner-controlled on a training-track PR (_ALLOWED_ALWAYS),
+# and _canonical_sft_sha256s_for_pr_window parses every revision in the PR's pin-grace
+# window through sft_sha256_from_canonical_text. Every unusable shape must be None.
+_UNUSABLE_CANONICAL_TEXTS = [
+    ("invalid_json", "{not json"),
+    ("payload_not_an_object", json.dumps([1, 2])),
+    ("mix_manifest_absent", json.dumps({"repo_id": "x"})),
+    ("mix_manifest_null", json.dumps({"mix_manifest": None})),
+    ("mix_manifest_list", json.dumps({"mix_manifest": [{"sft_sha256": "a" * 64}]})),
+    ("mix_manifest_string", json.dumps({"mix_manifest": "a" * 64})),
+    ("mix_manifest_number", json.dumps({"mix_manifest": 5})),
+    ("digest_too_short", json.dumps({"mix_manifest": {"sft_sha256": "abc"}})),
+]
+
+
+@pytest.mark.parametrize("case, text", _UNUSABLE_CANONICAL_TEXTS, ids=[c for c, _ in _UNUSABLE_CANONICAL_TEXTS])
+def test_sft_sha256_from_canonical_text_returns_none_for_unusable_shapes(case, text):
+    assert sft_sha256_from_canonical_text(text) is None
+
+
+def test_sft_sha256_from_canonical_text_reads_a_valid_pin():
+    assert sft_sha256_from_canonical_text(json.dumps({"mix_manifest": {"sft_sha256": "a" * 64}})) == "a" * 64
+
+
+def test_canonical_sft_sha256_raises_valueerror_on_non_object_mix_manifest(tmp_path):
+    """Callers catch ValueError from this function; AttributeError escaped them."""
+    pin = tmp_path / "canonical.json"
+    pin.write_text(json.dumps({"mix_manifest": ["not", "an", "object"]}), encoding="utf-8")
+    with pytest.raises(ValueError, match="mix_manifest must be a JSON object"):
+        canonical_sft_sha256(pin)
+
+
+def test_canonical_sft_sha256_still_raises_on_a_bad_digest(tmp_path):
+    pin = tmp_path / "canonical.json"
+    pin.write_text(json.dumps({"mix_manifest": {"sft_sha256": "abc"}}), encoding="utf-8")
+    with pytest.raises(ValueError, match="64-char hex digest"):
+        canonical_sft_sha256(pin)
+
+
+def test_gate_training_pr_survives_a_non_object_mix_manifest_at_the_pr_head(monkeypatch):
+    """The gate must reject the PR, not abort the Training track gate job."""
+    import eval.training_track_gate as gate
+
+    monkeypatch.setattr(
+        gate,
+        "_git_show",
+        lambda ref, path: (
+            json.dumps({"mix_manifest": [{"sft_sha256": "a" * 64}]}) if path.endswith("canonical.json") else ""
+        ),
+    )
+
+    report = gate_training_pr(
+        head_ref="HEAD",
+        changed_paths=["recipes/foo.yaml", "datasets/canonical.json"],
+        pr_body="- [x] **Training/evaluation improvement**",
+        merge_base_ref="origin/main",
+        verify_hf_pin=False,
+        verify_proof_bundle=False,
+    )
+    assert report["verified"] is False
+    assert report["label"] == "training:REJECT"
+    assert report["issues"]
