@@ -13,8 +13,31 @@ GSM8K_RELAXED_REGRESSION_FLOOR_PCT = 2.0
 
 
 def pct_delta(candidate: float, frontier: float) -> float:
+    """Percent change vs. the frontier score. Always finite.
+
+    Scores are fractions in `[0, 1]` (`eval.benchmarks.assert_fraction_scores`), so a
+    frontier score of exactly 0 has no relative baseline to divide by. Returning
+    `float("inf")` there broke two invariants the pipeline states elsewhere:
+
+    - **Tiering.** `eval.score._TIER_BANDS` reads this value, and `inf` clears every
+      band, so *any* nonzero candidate scored the top tier: over a 0.0 frontier,
+      `0.001` earned the same `eval:XL` as `0.9`. A bucket seeded at 0 by its own
+      `eval:BASELINE` run (`merge_frontier_scores` keeps a 0 high until it is beaten,
+      and `runs/frontiers.json` already carries 0.0 entries) therefore handed out the
+      maximum multiplier for a rounding-error gain.
+    - **Serialization.** `inf` reaches `report["best_pct_delta"]`, which is written with
+      `json.dumps` into `runs/ledger.jsonl`, `runs/<run-id>/result.json` and the gate
+      report — as a bare `Infinity` literal, which is not valid JSON (RFC 8259) and is
+      rejected by any strict parser. `assert_fraction_scores` already refuses NaN/Inf
+      at ingestion for exactly this reason; nothing should mint one downstream.
+
+    With no ratio available, fall back to the absolute gain in **percentage points** —
+    the unit the tier bands and `regression_floor_pct` already speak. A genuine 0 -> 0.9
+    jump still tiers `XL` (90.0), while 0 -> 0.001 tiers `none` (0.1). Candidates cannot
+    be negative, so the regression path over a 0 frontier is unchanged (delta >= 0).
+    """
     if frontier == 0:
-        return 0.0 if candidate == 0 else float("inf")
+        return (candidate - frontier) * 100.0
     return (candidate - frontier) / frontier * 100.0
 
 

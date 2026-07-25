@@ -27,6 +27,22 @@ All notable changes to SparkDistill are documented here. The format follows
   keeps the pins and Python (uv) deps current. `tritonbench/` (vendored) is excluded from ruff.
 
 ### Fixed
+- **A zero frontier score no longer pays `eval:XL` for a rounding-error gain**:
+  `pct_delta` returned `float("inf")` whenever the frontier score was exactly 0, and
+  `eval.score._TIER_BANDS` reads that value, so *any* nonzero candidate cleared every
+  band — over a 0.0 frontier, `triton` 0.001 earned the same top `eval:XL` (8.0x) as
+  0.9. A bucket seeded at 0 by its own `eval:BASELINE` run reaches that state on its
+  own: `merge_frontier_scores` keeps a 0 high until something beats it, and
+  `runs/frontiers.json` already carries 0.0 entries. The same `inf` also landed in
+  `report["best_pct_delta"]`, which `json.dumps` writes into `runs/ledger.jsonl`,
+  `runs/<run-id>/result.json` and the gate report as a bare `Infinity` literal — not
+  valid JSON (RFC 8259) and rejected by strict parsers, even though
+  `assert_fraction_scores` already refuses NaN/Inf at ingestion for that exact reason.
+  With no ratio available, `pct_delta` now falls back to the absolute gain in
+  percentage points (the unit the tier bands and `regression_floor_pct` already use), so
+  a real 0 -> 0.9 jump still tiers `XL` while 0 -> 0.001 tiers `none`. Non-zero
+  frontiers are untouched, and candidates cannot be negative so the regression path over
+  a 0 frontier is unchanged.
 - **`serve_stack._gpu_architecture` `UnboundLocalError` on the auto-detect path**: when
   `SPARKDISTILL_GPU_ARCHITECTURE` was unset and `nvidia-smi` succeeded, `normalize_gpu_architecture`
   was referenced but only imported inside the override branch (and `subprocess` only inside the
