@@ -27,6 +27,20 @@ All notable changes to SparkDistill are documented here. The format follows
   keeps the pins and Python (uv) deps current. `tritonbench/` (vendored) is excluded from ruff.
 
 ### Fixed
+- **A missing `mix_manifest.json` no longer bypasses the canonical dataset pin**:
+  `check_canonical_dataset_claim` only compared the bundle's `mix_manifest.sft_sha256`
+  against the accepted pin(s) `if mix_path.exists()`, so omitting the file skipped the
+  comparison entirely — a *wrong* `sft_sha256` was rejected while *no* `mix_manifest.json`
+  passed clean, making omission strictly better for a miner who trained on a private or
+  re-mixed blend. Nothing else covered it: `check_mix_provenance` only fires when the
+  manifest itself references `mix_manifest_sha256`, `verify_remote_proof_bundle` swallows
+  the missing-file download in `except Exception: pass`, `proof.bundle --mix-manifest` is
+  optional, and `validate_pr_body_canonical_pin` only greps the PR body for a pin the
+  miner can copy off `main`. The file is now required evidence whenever a bundle claims
+  the canonical `dataset_url` (as CONTRIBUTING.md and the PR template already state), and
+  a non-object `mix_manifest.json` is rejected instead of raising. An unreadable
+  repo-side pin still short-circuits, so a broken `datasets/canonical.json` cannot fail
+  honest submissions.
 - **`serve_stack._gpu_architecture` `UnboundLocalError` on the auto-detect path**: when
   `SPARKDISTILL_GPU_ARCHITECTURE` was unset and `nvidia-smi` succeeded, `normalize_gpu_architecture`
   was referenced but only imported inside the override branch (and `subprocess` only inside the

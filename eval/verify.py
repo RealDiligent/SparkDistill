@@ -109,7 +109,21 @@ def check_canonical_dataset_claim(
     bundle_dir: Path | None = None,
     acceptable_sft_shas: set[str] | None = None,
 ) -> list[str]:
-    """Training-track bundles must cite the pinned canonical mining dataset."""
+    """Training-track bundles must cite the pinned canonical mining dataset.
+
+    When `bundle_dir` is given, `mix_manifest.json` is **required** evidence for the
+    canonical `dataset_url` the manifest just claimed, and its `sft_sha256` must match
+    an accepted pin. Treating the file as optional made omitting it strictly better for
+    a dishonest miner than shipping it: a wrong `sft_sha256` was rejected, while no
+    `mix_manifest.json` at all skipped the pin comparison entirely — so a checkpoint
+    trained on a private or re-mixed blend passed by simply leaving the evidence out.
+    `check_mix_provenance` does not cover the gap either (it only fires when the
+    manifest itself references `mix_manifest_sha256`), and neither does the PR body
+    check, which only greps the body text for a pin the miner can copy from `main`.
+    Bundles are built by `proof.bundle`, whose `--mix-manifest` is optional, and
+    CONTRIBUTING.md / the PR template already require the file — this makes the gate
+    enforce the documented rule.
+    """
     issues: list[str] = []
     dataset_url = manifest.get("dataset_url")
     try:
@@ -128,21 +142,36 @@ def check_canonical_dataset_claim(
         )
 
     if bundle_dir is not None:
+        allowed = acceptable_sft_shas
+        if allowed is None:
+            try:
+                allowed = {canonical_sft_sha256()}
+            except ValueError:
+                return issues
+
         mix_path = bundle_dir / "mix_manifest.json"
-        if mix_path.exists():
-            mix_data = json.loads(mix_path.read_text(encoding="utf-8"))
-            remote_sft_sha = mix_data.get("sft_sha256")
-            allowed = acceptable_sft_shas
-            if allowed is None:
-                try:
-                    allowed = {canonical_sft_sha256()}
-                except ValueError:
-                    return issues
-            if remote_sft_sha not in allowed:
-                issues.append(
-                    "bundle mix_manifest.sft_sha256 does not match an accepted canonical pin "
-                    f"(allowed {len(allowed)} pin(s) for this PR window)"
-                )
+        if not mix_path.exists():
+            issues.append(
+                "training bundle claims the canonical dataset_url but ships no mix_manifest.json; "
+                "publish it alongside the bundle (proof.bundle --mix-manifest) so the pinned "
+                "sft_sha256 can be checked — an absent mix_manifest is not an exemption from the pin"
+            )
+            return issues
+
+        mix_data = json.loads(mix_path.read_text(encoding="utf-8"))
+        if not isinstance(mix_data, dict):
+            issues.append(
+                f"bundle mix_manifest.json must be a JSON object, got {type(mix_data).__name__}; "
+                "the pinned sft_sha256 cannot be read from it"
+            )
+            return issues
+
+        remote_sft_sha = mix_data.get("sft_sha256")
+        if remote_sft_sha not in allowed:
+            issues.append(
+                "bundle mix_manifest.sft_sha256 does not match an accepted canonical pin "
+                f"(allowed {len(allowed)} pin(s) for this PR window)"
+            )
     return issues
 
 

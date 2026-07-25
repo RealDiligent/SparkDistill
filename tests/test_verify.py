@@ -1,4 +1,23 @@
+import json
+from pathlib import Path
+
 from eval.verify import _no_student_endpoint_env, check_claim, check_training_claims, resolve_bundle_gpu_architecture
+
+
+def _write_canonical_mix_manifest(bundle: Path) -> None:
+    """Write the `mix_manifest.json` evidence every canonical-dataset bundle must ship.
+
+    Mirrors what the honest flow publishes: `eval.prepare_mining_sft` copies the remote
+    canonical manifest verbatim, so it carries `mix_version` + the pinned `sft_sha256`.
+    A bundle that claims the canonical `dataset_url` but omits this file has no checkable
+    pin, so `check_canonical_dataset_claim` rejects it.
+    """
+    from eval.canonical_dataset import canonical_sft_sha256
+    from eval.mix_registry import MIX_VERSION
+
+    (bundle / "mix_manifest.json").write_text(
+        json.dumps({"mix_version": MIX_VERSION, "sft_sha256": canonical_sft_sha256()})
+    )
 
 
 def test_check_claim_within_tolerance_has_no_mismatch():
@@ -164,6 +183,7 @@ def test_proof_only_bundle_requires_local_checkpoint(tmp_path):
     bundle.mkdir()
     (bundle / "manifest.json").write_text(json.dumps({"run_id": "r1", "dataset_url": canonical_hf_url()}))
     (bundle / "eval_scores.json").write_text(json.dumps({"scores": {"gsm8k": 0.6, "triton": 0.4}}))
+    _write_canonical_mix_manifest(bundle)
 
     report = verify_submission(bundle, frontier={"gsm8k": 0.5, "triton": 0.3})
     assert report["verified"] is False
@@ -261,6 +281,7 @@ def test_no_frontier_yields_baseline_label(tmp_path, monkeypatch):
     (bundle / "checkpoint" / "w.bin").write_text("w")
     (bundle / "manifest.json").write_text(json.dumps({"run_id": "r1", "dataset_url": canonical_hf_url()}))
     (bundle / "eval_scores.json").write_text(json.dumps({"scores": {"gsm8k": 0.6, "triton": 0.5}}))
+    _write_canonical_mix_manifest(bundle)
     monkeypatch.setattr(v, "run_harness", lambda *a, **k: {"gsm8k": 0.6, "triton": 0.5})
 
     report = v.verify_submission(bundle, frontier=None)
@@ -336,6 +357,7 @@ def test_attested_gsm8k_skips_harness_without_checkpoint(tmp_path, monkeypatch):
     (bundle / "manifest.json").write_text(json.dumps({"run_id": "r-attest", "dataset_url": canonical_hf_url()}))
     (bundle / "eval_scores.json").write_text(json.dumps({"scores": {"gsm8k": sample["exact_match"]}}))
     (bundle / REGRESSION_SAMPLE_FILENAME).write_text(json.dumps(sample, indent=2))
+    _write_canonical_mix_manifest(bundle)
 
     digest = claim_sha256(bundle)
     # Integrity is stubbed; claim_bound still goes through check_claim_binding.
@@ -381,10 +403,90 @@ def test_attested_gsm8k_sample_without_attestation_fails(tmp_path):
     (bundle / "manifest.json").write_text(json.dumps({"run_id": "r1", "dataset_url": canonical_hf_url()}))
     (bundle / "eval_scores.json").write_text(json.dumps({"scores": {"gsm8k": sample["exact_match"]}}))
     (bundle / REGRESSION_SAMPLE_FILENAME).write_text(json.dumps(sample, indent=2))
+    _write_canonical_mix_manifest(bundle)
 
     report = verify_submission(bundle, frontier={"gsm8k": 0.5})
     assert report["verified"] is False
     assert report["reason"] == "attested_eval_samples_failed"
+
+
+def _canonical_claim_manifest() -> dict:
+    from eval.canonical_dataset import canonical_hf_url
+
+    return {"run_id": "r1", "dataset_url": canonical_hf_url()}
+
+
+def test_canonical_claim_requires_mix_manifest_evidence(tmp_path):
+    """Omitting mix_manifest.json must not be a way out of the canonical pin check.
+
+    A wrong sft_sha256 was rejected while an absent mix_manifest.json skipped the
+    comparison entirely, so leaving the evidence out was strictly better for a miner
+    who trained on a private or re-mixed blend.
+    """
+    from eval.verify import check_canonical_dataset_claim
+
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    issues = check_canonical_dataset_claim(_canonical_claim_manifest(), bundle_dir=bundle)
+    assert any("mix_manifest.json" in issue for issue in issues)
+
+
+def test_canonical_claim_missing_mix_manifest_rejected_under_pin_grace(tmp_path):
+    """The [#121] grace window widens which pins are accepted, never whether one is."""
+    from eval.verify import check_canonical_dataset_claim
+
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    issues = check_canonical_dataset_claim(
+        _canonical_claim_manifest(),
+        bundle_dir=bundle,
+        acceptable_sft_shas={"c" * 64},
+    )
+    assert any("mix_manifest.json" in issue for issue in issues)
+
+
+def test_canonical_claim_rejects_non_object_mix_manifest(tmp_path):
+    from eval.verify import check_canonical_dataset_claim
+
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "mix_manifest.json").write_text(json.dumps([{"sft_sha256": "a" * 64}]))
+    issues = check_canonical_dataset_claim(_canonical_claim_manifest(), bundle_dir=bundle)
+    assert any("must be a JSON object" in issue for issue in issues)
+
+
+def test_canonical_claim_accepts_pinned_mix_manifest(tmp_path):
+    from eval.verify import check_canonical_dataset_claim
+
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    _write_canonical_mix_manifest(bundle)
+    assert check_canonical_dataset_claim(_canonical_claim_manifest(), bundle_dir=bundle) == []
+
+
+def test_canonical_claim_without_bundle_dir_still_manifest_only(tmp_path):
+    """The manifest-only call site (training_track_gate stage 1) is unchanged."""
+    from eval.verify import check_canonical_dataset_claim
+
+    assert check_canonical_dataset_claim(_canonical_claim_manifest()) == []
+
+
+def test_verify_submission_rejects_bundle_without_mix_manifest(tmp_path, monkeypatch):
+    """End to end: the missing-evidence bundle is eval:REJECT, not a scored submission."""
+    import eval.verify as v
+
+    bundle = tmp_path / "bundle"
+    (bundle / "checkpoint").mkdir(parents=True)
+    (bundle / "checkpoint" / "w.bin").write_text("w")
+    (bundle / "manifest.json").write_text(json.dumps(_canonical_claim_manifest()))
+    (bundle / "eval_scores.json").write_text(json.dumps({"scores": {"gsm8k": 0.6, "triton": 0.5}}))
+    monkeypatch.setattr(v, "run_harness", lambda *a, **k: {"gsm8k": 0.6, "triton": 0.5})
+
+    report = v.verify_submission(bundle, frontier={"gsm8k": 0.5, "triton": 0.4})
+    assert report["verified"] is False
+    assert report["reason"] == "canonical_dataset_failed"
+    assert report["label"] == "eval:REJECT"
+    assert any("mix_manifest.json" in issue for issue in report["issues"])
 
 
 def test_resolve_bundle_gpu_architecture_prefers_explicit_field():
@@ -413,6 +515,7 @@ def test_verify_submission_hopper_tiers_on_triton(tmp_path, monkeypatch):
         json.dumps({"run_id": "r-hopper", "dataset_url": canonical_hf_url(), "train_gpu": "NVIDIA H100"})
     )
     (bundle / "eval_scores.json").write_text(json.dumps({"scores": {"gsm8k": 0.6, "triton": 0.5}}))
+    _write_canonical_mix_manifest(bundle)
     monkeypatch.setattr(v, "run_harness", lambda *a, **k: {"gsm8k": 0.6, "triton": 0.5})
 
     report = v.verify_submission(bundle, frontier={"gsm8k": 0.5, "triton": 0.4})

@@ -33,6 +33,20 @@ def _fake_snapshot(bundle_dir: Path):
     return fake_snapshot_download
 
 
+def _write_canonical_mix_manifest(bundle: Path) -> None:
+    """Write the `mix_manifest.json` evidence every canonical-dataset bundle must ship.
+
+    A bundle claiming the canonical `dataset_url` without it has no checkable pin, so
+    `eval.verify.check_canonical_dataset_claim` rejects it before any tiering happens.
+    """
+    from eval.canonical_dataset import canonical_sft_sha256
+    from eval.mix_registry import MIX_VERSION
+
+    (bundle / "mix_manifest.json").write_text(
+        json.dumps({"mix_version": MIX_VERSION, "sft_sha256": canonical_sft_sha256()})
+    )
+
+
 def test_verify_remote_proof_bundle_scores_rejects_forged_passed_true(tmp_path, monkeypatch):
     """{"passed": true} without JWKS/claim binding must not earn an eval tier."""
     import eval.training_track_gate as gate
@@ -68,6 +82,7 @@ def test_verify_remote_proof_bundle_scores_tiers_claims_when_attestation_crypto_
     bundle.mkdir()
     (bundle / "manifest.json").write_text(json.dumps({"run_id": "r1", "dataset_url": canonical_hf_url()}))
     (bundle / "eval_scores.json").write_text(json.dumps({"scores": {"triton": 0.421}}))
+    _write_canonical_mix_manifest(bundle)
 
     monkeypatch.setattr("huggingface_hub.snapshot_download", _fake_snapshot(bundle))
     monkeypatch.setattr(
@@ -94,6 +109,7 @@ def test_verify_remote_proof_bundle_scores_rejects_without_attestation(tmp_path,
     bundle.mkdir()
     (bundle / "manifest.json").write_text(json.dumps({"run_id": "r1", "dataset_url": canonical_hf_url()}))
     (bundle / "eval_scores.json").write_text(json.dumps({"scores": {"triton": 0.5444}}))
+    _write_canonical_mix_manifest(bundle)
 
     monkeypatch.setattr("huggingface_hub.snapshot_download", _fake_snapshot(bundle))
 
