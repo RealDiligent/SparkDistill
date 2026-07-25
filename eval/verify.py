@@ -422,6 +422,24 @@ def verify_submission(
     """
     manifest = json.loads((bundle_dir / "manifest.json").read_text())
     claimed = json.loads((bundle_dir / "eval_scores.json").read_text())["scores"]
+    # Fail closed at ingestion, the contract `assert_fraction_scores` documents.
+    # It was only reached on two conditional paths: `check_claim` (skipped when no
+    # benchmark needs a harness re-run — an attested-sample bundle) and `eval.score`
+    # (skipped when there is no frontier yet — `eval:BASELINE`). A bundle hitting
+    # both wrote its raw claim to `report["scores"]`, which `record_merged_ledger_entry`
+    # seeds into `runs/frontiers.json`; a non-fraction high there makes every later
+    # `eval.score` call for that architecture raise on its own frontier. Reject the
+    # bundle instead of raising: no caller of `verify_submission` catches ValueError.
+    try:
+        assert_fraction_scores(claimed, "claimed (eval_scores.json)")
+    except ValueError as exc:
+        return {
+            "verified": False,
+            "reason": "malformed_eval_scores",
+            "issues": [str(exc)],
+            "label": "eval:REJECT",
+            "run_id": manifest.get("run_id"),
+        }
     gpu_architecture = resolve_bundle_gpu_architecture(manifest)
 
     if attestation is not None and not attestation.get("passed"):

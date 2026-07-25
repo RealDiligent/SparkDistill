@@ -1,3 +1,5 @@
+import pytest
+
 from eval.verify import _no_student_endpoint_env, check_claim, check_training_claims, resolve_bundle_gpu_architecture
 
 
@@ -419,3 +421,54 @@ def test_verify_submission_hopper_tiers_on_triton(tmp_path, monkeypatch):
     assert report["gpu_architecture"] == "hopper"
     assert report["best_benchmark"] == "triton"
     assert report["label"] == "eval:XL"
+
+
+def test_baseline_bundle_rejects_non_fraction_claim(tmp_path, monkeypatch):
+    # A claim whose keys are all outside BENCHMARKS needs no harness re-run, so
+    # check_claim never runs; with no frontier eval.score never runs either. The
+    # claim used to reach report["scores"] unvalidated and seed runs/frontiers.json.
+    import json
+
+    import eval.verify as v
+
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "manifest.json").write_text(json.dumps({"run_id": "r1", "gpu_architecture": "hopper"}))
+    (bundle / "eval_scores.json").write_text(json.dumps({"scores": {"triton_syntax_pass_rate": 99999.0}}))
+    monkeypatch.setattr(v, "run_harness", lambda *a, **k: pytest.fail("no re-run is expected here"))
+
+    report = v.verify_submission(bundle, frontier=None)
+    assert report["verified"] is False
+    assert report["label"] == "eval:REJECT"
+    assert report["reason"] == "malformed_eval_scores"
+    assert report["run_id"] == "r1"
+    assert "scores" not in report
+
+
+def test_malformed_claim_rejects_instead_of_raising(tmp_path, monkeypatch):
+    # verify_submission's callers (_download_and_verify_bundle -> gate_training_pr)
+    # do not catch ValueError, so a bad claim must come back as a REJECT report
+    # rather than crashing the training-track CI job.
+    import json
+
+    import eval.verify as v
+    from eval.canonical_dataset import canonical_hf_url
+
+    bundle = tmp_path / "bundle"
+    (bundle / "checkpoint").mkdir(parents=True)
+    (bundle / "checkpoint" / "w.bin").write_text("w")
+    (bundle / "manifest.json").write_text(json.dumps({"run_id": "r2", "dataset_url": canonical_hf_url()}))
+    monkeypatch.setattr(v, "run_harness", lambda *a, **k: {"gsm8k": 0.6})
+
+    for bad in (float("inf"), float("nan"), 88.0, -0.1, True, "high", None):
+        (bundle / "eval_scores.json").write_text(json.dumps({"scores": {"gsm8k": bad}}))
+        report = v.verify_submission(bundle, frontier={"gsm8k": 0.5, "triton": 0.4})
+        assert report["label"] == "eval:REJECT", bad
+        assert report["reason"] == "malformed_eval_scores", bad
+
+    # An honest fraction claim still verifies and still records its full score set.
+    (bundle / "eval_scores.json").write_text(json.dumps({"scores": {"gsm8k": 0.6, "triton_quick": 0.42}}))
+    report = v.verify_submission(bundle, frontier=None)
+    assert report["verified"] is True
+    assert report["label"] == "eval:BASELINE"
+    assert report["scores"] == {"gsm8k": 0.6, "triton_quick": 0.42}

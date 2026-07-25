@@ -27,6 +27,15 @@ All notable changes to SparkDistill are documented here. The format follows
   keeps the pins and Python (uv) deps current. `tritonbench/` (vendored) is excluded from ruff.
 
 ### Fixed
+- **Unvalidated proof-bundle scores could poison `runs/frontiers.json`**: `eval.verify.verify_submission`
+  only reached `assert_fraction_scores` through `check_claim` (skipped when no benchmark needs a
+  harness re-run) or `eval.score` (skipped when the architecture has no frontier yet, i.e.
+  `eval:BASELINE`). A bundle on both paths had its raw `eval_scores.json` copied into
+  `report["scores"]`, which `record_merged_ledger_entry` seeds into `runs/frontiers.json` — a
+  non-fraction high there made every later `eval.score` call for that architecture raise on its
+  own frontier, crashing the training-track gate instead of labelling the PR. The claim is now
+  validated once at ingestion and a malformed bundle is rejected as
+  `eval:REJECT` / `malformed_eval_scores` rather than raising, since no caller catches `ValueError`.
 - **`serve_stack._gpu_architecture` `UnboundLocalError` on the auto-detect path**: when
   `SPARKDISTILL_GPU_ARCHITECTURE` was unset and `nvidia-smi` succeeded, `normalize_gpu_architecture`
   was referenced but only imported inside the override branch (and `subprocess` only inside the
