@@ -43,6 +43,18 @@ All notable changes to SparkDistill are documented here. The format follows
   `1.0`/`0.0`, and NaN/Infinity (which `json.loads` accepts) could sneak past the range
   check. Every score value is now validated to be a finite, non-boolean real number,
   and a non-object `scores` payload is rejected up front.
+- **The training-track gate rejects a malformed proof bundle instead of aborting**:
+  completes the fix above. Hardening `assert_fraction_scores` made it raise a *clean*
+  `ValueError`, but `eval.training_track_gate` still never wrapped the calls that read
+  the miner-controlled bundle, so the exception simply changed type and kept escaping
+  `gate_training_pr` — a crafted `eval_scores.json` (non-fraction claim, missing
+  `scores` key, non-object `scores`) crashed the `Training track gate` job with a
+  traceback. The PR then got **no** `training:*` / `eval:*` label and was never
+  auto-closed, and the post-merge ledger job (`eval.record_training_ledger`, which
+  pushes to `main`) died the same way. `_download_and_verify_bundle` and the deferred
+  `score_claimed_eval_label` tiering path now convert a malformed bundle payload into a
+  gate issue — `training:REJECT`, and `eval:REJECT` when the claim itself cannot be
+  tiered. Valid bundles are unaffected.
 - **Registry mix export uses SparkProof publish path**: `eval.mix_registry` now delegates
   to SparkProof's `trajectory_to_messages_record` (same as HF publish) instead of
   `teacher.format`. Empty or failed-validation trajectories are skipped (not coerced

@@ -76,6 +76,13 @@ EVAL_LABELS = frozenset(
     {"eval:XL", "eval:L", "eval:M", "eval:S", "eval:XS", "eval:none", "eval:BASELINE", "eval:REJECT"}
 )
 _AUTO_CLOSE_EVAL_LABELS = frozenset({"eval:none", "eval:REJECT"})
+# Failures raised while reading a *miner-controlled* proof-bundle payload
+# (manifest.json / eval_scores.json). Neither `eval.verify.verify_submission` nor
+# `score_claimed_eval_label` is wrapped by its callers, and both index those
+# payloads directly (`json.loads(...)["scores"]`) or hand them to
+# `eval.benchmarks.assert_fraction_scores`, which fails closed by *raising*. A
+# crafted bundle must reject the submission, not abort the gate step.
+_BUNDLE_PAYLOAD_ERRORS = (ValueError, TypeError, KeyError, IndexError, AttributeError)
 _EVAL_LABEL_COLORS = {
     "eval:XL": "1d76db",
     "eval:L": "0e8a16",
@@ -386,8 +393,9 @@ def _download_and_verify_bundle(
 
     Returns `(report, attestation, error, bundle_dir)`: `error` is set (and the other
     fields None) only when the bundle couldn't be read at all (bad attestation JSON,
-    download failure, or files missing) — genuine verify_submission outcomes
-    (including REJECT) come back as a populated `report`, never as `error`.
+    download failure, malformed manifest/scores payload, or files missing) — genuine
+    verify_submission outcomes (including REJECT) come back as a populated `report`,
+    never as `error`.
     """
     from huggingface_hub import snapshot_download
 
@@ -412,15 +420,23 @@ def _download_and_verify_bundle(
     if not (bundle_dir / "manifest.json").exists() or not (bundle_dir / "eval_scores.json").exists():
         return None, None, None, bundle_dir  # already flagged by verify_remote_proof_bundle
 
-    manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
-    frontier = load_frontier_scores(resolve_bundle_gpu_architecture(manifest))
+    try:
+        manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
+        frontier = load_frontier_scores(resolve_bundle_gpu_architecture(manifest))
 
-    report = verify_submission(
-        bundle_dir,
-        frontier,
-        attestation=attestation,
-        acceptable_sft_shas=acceptable_sft_shas,
-    )
+        report = verify_submission(
+            bundle_dir,
+            frontier,
+            attestation=attestation,
+            acceptable_sft_shas=acceptable_sft_shas,
+        )
+    except _BUNDLE_PAYLOAD_ERRORS as exc:
+        return (
+            None,
+            None,
+            f"proof bundle {repo_id} has a malformed manifest.json / eval_scores.json: {type(exc).__name__}: {exc}",
+            None,
+        )
     return report, attestation, None, bundle_dir
 
 
@@ -486,7 +502,9 @@ def verify_remote_proof_bundle_scores(
     eval.verify computed (e.g. "eval:BASELINE", "eval:XL", "eval:REJECT"), or
     a tier derived from claimed scores when verify is deferred *and* attestation
     crypto passes ("checkpoint_required"), or None when nothing could be computed
-    (download failure).
+    (download failure, or a bundle payload too malformed to verify at all).
+    Claimed scores that cannot be tiered (non-fraction, non-object, missing
+    ``scores``) are ``eval:REJECT``, never an uncaught exception.
     """
     report, attestation, error, bundle_dir = _download_and_verify_bundle(
         repo_id,
@@ -508,8 +526,13 @@ def verify_remote_proof_bundle_scores(
             )
             if attestation_issues:
                 return attestation_issues, "eval:REJECT"
-            manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
-            return [], score_claimed_eval_label(bundle_dir, manifest)
+            try:
+                manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
+                return [], score_claimed_eval_label(bundle_dir, manifest)
+            except _BUNDLE_PAYLOAD_ERRORS as exc:
+                return [
+                    f"proof bundle {repo_id} claimed scores are not tierable: {type(exc).__name__}: {exc}"
+                ], "eval:REJECT"
         return [], None
     if report.get("verified"):
         return [], report.get("label")

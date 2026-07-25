@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from eval.training_track_gate import (
     EVAL_LABELS,
     close_training_pr,
@@ -188,6 +190,103 @@ def test_verify_remote_proof_bundle_scores_reads_attestation_from_head_ref(tmp_p
     assert issues == []
     assert eval_label == "eval:BASELINE"
     assert captured["attestation"] == {"passed": True}
+
+
+_MALFORMED_EVAL_SCORES = [
+    # Non-fraction claims: assert_fraction_scores fails closed by *raising*, so the
+    # gate must catch it — reached via score_claimed_eval_label (verify deferred).
+    ("non_numeric_string", {"scores": {"triton": "0.421"}}),
+    ("percentage_not_fraction", {"scores": {"triton": 42.1}}),
+    ("null_score", {"scores": {"triton": None}}),
+    # Payload shape: eval.verify indexes ["scores"] directly.
+    ("missing_scores_key", {"triton": 0.421}),
+    ("scores_not_an_object", {"scores": [0.421]}),
+]
+
+
+@pytest.mark.parametrize("case, payload", _MALFORMED_EVAL_SCORES, ids=[case for case, _ in _MALFORMED_EVAL_SCORES])
+def test_verify_remote_proof_bundle_scores_rejects_malformed_eval_scores(case, payload, tmp_path, monkeypatch):
+    """A crafted eval_scores.json must reject the PR, not abort the CI gate step."""
+    import eval.training_track_gate as gate
+    import eval.verify as verify_mod
+    from eval.canonical_dataset import canonical_hf_url
+
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "manifest.json").write_text(json.dumps({"run_id": "r1", "dataset_url": canonical_hf_url()}))
+    (bundle / "eval_scores.json").write_text(json.dumps(payload))
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _fake_snapshot(bundle))
+    monkeypatch.setattr(
+        gate,
+        "_git_show",
+        lambda ref, path: json.dumps({"passed": True, "token": "x"}) if path.endswith("attestation.json") else "",
+    )
+    monkeypatch.setattr(verify_mod, "check_attestation_integrity", lambda *a, **k: [])
+
+    issues, eval_label = verify_remote_proof_bundle_scores(
+        "org/repo",
+        head_ref="HEAD",
+        changed_paths=["recipes/foo.yaml", "runs/r1/attestation.json"],
+    )
+    assert issues, f"{case}: malformed bundle must surface a gate issue"
+    assert eval_label in (None, "eval:REJECT")
+    assert any("org/repo" in issue for issue in issues)
+
+
+def test_gate_training_pr_rejects_malformed_bundle_without_raising(tmp_path, monkeypatch):
+    """End to end: a malformed bundle yields training:REJECT, not a traceback."""
+    import eval.training_track_gate as gate
+
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "manifest.json").write_text(json.dumps({"run_id": "r1"}))
+    (bundle / "eval_scores.json").write_text(json.dumps({"triton": 0.421}))  # no "scores" key
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _fake_snapshot(bundle))
+    monkeypatch.setattr(gate, "should_enforce_training_gate", lambda *a, **k: True)
+    monkeypatch.setattr(gate, "_canonical_sft_sha256s_for_pr_window", lambda **k: {"a" * 64})
+    monkeypatch.setattr(gate, "validate_pr_body_canonical_pin", lambda *a, **k: [])
+    monkeypatch.setattr(gate, "validate_pr_body_proof_bundle", lambda *a, **k: [])
+    monkeypatch.setattr(gate, "load_canonical", lambda: {})
+    monkeypatch.setattr(gate, "parse_proof_bundle_hf_repo", lambda *a, **k: "org/repo")
+    monkeypatch.setattr(gate, "verify_remote_proof_bundle", lambda *a, **k: [])
+
+    report = gate.gate_training_pr(
+        head_ref="HEAD",
+        changed_paths=["recipes/foo.yaml"],
+        pr_body="- [x] Training/evaluation improvement",
+        verify_hf_pin=False,
+    )
+    assert report["verified"] is False
+    assert report["label"] == "training:REJECT"
+    assert any("malformed" in issue for issue in report["issues"])
+
+
+def test_record_merged_ledger_entry_reports_malformed_bundle(tmp_path, monkeypatch):
+    """The post-merge ledger job reports a malformed bundle instead of dying mid-write."""
+    import eval.training_track_gate as gate
+
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "manifest.json").write_text(json.dumps({"run_id": "r1"}))
+    (bundle / "eval_scores.json").write_text(json.dumps({"triton": 0.421}))  # no "scores" key
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _fake_snapshot(bundle))
+    monkeypatch.setattr(gate, "_git_show", lambda ref, path: "")
+
+    ledger_path = tmp_path / "ledger.jsonl"
+    issues = record_merged_ledger_entry(
+        pr_url="https://github.com/org/repo/pull/1",
+        pr_body=_PR_BODY_WITH_BUNDLE,
+        head_ref="HEAD",
+        changed_paths=None,
+        ledger_path=ledger_path,
+    )
+    assert len(issues) == 1
+    assert "malformed" in issues[0]
+    assert not ledger_path.exists()
+    assert not (tmp_path / "frontiers.json").exists()
 
 
 def test_update_pr_eval_label_rejects_unknown_label():
