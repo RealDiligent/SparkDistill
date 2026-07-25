@@ -56,6 +56,13 @@ def compute_exact_match(responses: list[dict[str, Any]], problems: list[dict[str
         problem_id = int(item["problem_id"])
         if problem_id not in by_id:
             raise ValueError(f"unknown problem_id {problem_id}")
+        # `responses` is miner-controlled (bundled attested sample). A row without
+        # this key raised KeyError, which `verify_regression_sample` does not catch —
+        # it only handles the ValueError this function documents — so the gate died
+        # with a traceback instead of rejecting the bundle. Same failure shape the
+        # problem_id coverage guard already fails closed on.
+        if "model_response" not in item:
+            raise ValueError(f"problem_id {problem_id} is missing model_response")
         if grade_response(gold_answer(by_id[problem_id]), str(item["model_response"])):
             correct += 1
     return correct / len(problems)

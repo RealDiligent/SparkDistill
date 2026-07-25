@@ -27,6 +27,13 @@ All notable changes to SparkDistill are documented here. The format follows
   keeps the pins and Python (uv) deps current. `tritonbench/` (vendored) is excluded from ruff.
 
 ### Fixed
+- **Attested regression sample without `model_response` crashed the training-track gate**:
+  `eval.regression_sample.compute_exact_match` indexed `item["model_response"]` directly on a
+  miner-supplied response row. `verify_regression_sample` catches only the `ValueError` that
+  function documents, so a row carrying a valid `problem_id` but no `model_response` passed the
+  #207 coverage guard and then raised `KeyError` out of `verify_submission` — killing the CI job
+  with a traceback instead of rejecting the bundle. The missing key now raises the documented
+  `ValueError`, which the existing handler turns into a normal rejection issue.
 - **`serve_stack._gpu_architecture` `UnboundLocalError` on the auto-detect path**: when
   `SPARKDISTILL_GPU_ARCHITECTURE` was unset and `nvidia-smi` succeeded, `normalize_gpu_architecture`
   was referenced but only imported inside the override branch (and `subprocess` only inside the

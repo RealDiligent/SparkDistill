@@ -92,3 +92,44 @@ def test_verify_regression_sample_rejects_incomplete_ids():
     sample["responses"] = sample["responses"][:-1]
     issues = verify_regression_sample(sample, claimed_gsm8k=1.0)
     assert any("exactly once" in issue for issue in issues)
+
+
+def test_response_missing_model_response_is_rejected_not_raised():
+    # A bundled attested sample is miner-controlled. Every problem_id is present
+    # exactly once here, so the coverage guard passes and the row reaches grading;
+    # the missing key used to raise KeyError straight through verify_regression_sample
+    # (which only catches ValueError) and kill the training-track gate.
+    import pytest
+
+    from eval.regression_sample import (
+        REGRESSION_BENCHMARK_KEY,
+        REGRESSION_PROBLEMS_PATH,
+        REGRESSION_VERSION,
+        compute_exact_match,
+        load_regression_problems,
+        regression_problem_set_sha256,
+        verify_regression_sample,
+    )
+
+    problems = load_regression_problems()
+    responses = [{"problem_id": int(row["problem_id"])} for row in problems]
+    sample = {
+        "version": REGRESSION_VERSION,
+        "benchmark": REGRESSION_BENCHMARK_KEY,
+        "problem_set_path": REGRESSION_PROBLEMS_PATH.name,
+        "problem_set_sha256": regression_problem_set_sha256(),
+        "rows_total": len(problems),
+        "exact_match": 1.0,
+        "responses": responses,
+    }
+
+    issues = verify_regression_sample(sample, claimed_gsm8k=0.9)
+    assert any("missing model_response" in issue for issue in issues)
+
+    # The builder-side contract is the documented ValueError, not KeyError.
+    with pytest.raises(ValueError, match="missing model_response"):
+        compute_exact_match(responses, problems)
+
+    # An honest sample is unaffected.
+    graded = [{"problem_id": int(row["problem_id"]), "model_response": str(row["answer"])} for row in problems]
+    assert compute_exact_match(graded, problems) == 1.0
