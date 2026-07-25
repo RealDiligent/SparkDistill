@@ -184,7 +184,12 @@ def verify_tritonbench_report(
     if not isinstance(report, dict):
         return None, ["triton: attested sample missing TritonBench report"]
 
-    recomputed_scores = summary_scores(report)
+    # summary_scores reads miner-controlled numbers; it fails closed with ValueError
+    # rather than letting float()/`.get` raise straight through this verifier.
+    try:
+        recomputed_scores = summary_scores(report)
+    except ValueError as exc:
+        return None, [f"triton: {exc}"]
     reported_scores = entry.get("scores") or {}
     for key in ("triton", "triton_quick"):
         if key in reported_scores and abs(float(reported_scores[key]) - recomputed_scores[key]) > 1e-9:

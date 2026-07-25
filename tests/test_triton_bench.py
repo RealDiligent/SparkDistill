@@ -244,3 +244,48 @@ def test_extract_metric_handles_lm_eval_filter_suffixes():
     assert _extract_metric({"exact_match": 0.9}, "exact_match") == 0.9
     assert _extract_metric({"exact_match,flexible-extract": 0.8, "exact_match,strict-match": 0.7}, "exact_match") == 0.7
     assert _extract_metric({"acc,none": 0.6}, "acc") == 0.6
+
+
+def test_summary_scores_rejects_malformed_miner_report():
+    # A bundled TritonBench report is miner-controlled and reaches summary_scores
+    # through verify_tritonbench_report on the attested no-GPU path. Every shape
+    # below used to raise AttributeError / TypeError / a bare ValueError straight
+    # out of verify_submission and kill the training-track gate.
+    import pytest
+
+    from eval.attested_samples import verify_tritonbench_report
+    from eval.triton_bench import summary_scores
+
+    good = {
+        "summary": {
+            "avg_composite": 0.42,
+            "exec_pass_rate": 0.0,
+            "avg_correctness": 0.0,
+            "syntax_pass_rate": 0.66,
+        },
+        "details": [{"level": 1, "composite_score": 0.42}],
+    }
+    assert summary_scores(good)["triton"] == 0.42
+
+    malformed = [
+        {**good, "details": {"level": 1}},
+        {**good, "details": "level-1"},
+        {**good, "details": ["x"]},
+        {**good, "details": [None]},
+        {**good, "details": [{"level": 1, "composite_score": "high"}]},
+        {**good, "details": [{"level": 1, "composite_score": None}]},
+        {**good, "details": [{"level": 1, "composite_score": float("inf")}]},
+        {**good, "summary": [0.9]},
+        {**good, "summary": {"avg_composite": "high"}},
+        {**good, "summary": {"avg_composite": True}},
+    ]
+    for report in malformed:
+        with pytest.raises(ValueError, match="tritonbench report"):
+            summary_scores(report)
+        score, issues = verify_tritonbench_report(
+            {"type": "tritonbench_report", "report": report},
+            claimed={"triton": 0.42},
+            frontier={"triton": 0.4},
+        )
+        assert score is None
+        assert any("tritonbench report" in issue for issue in issues)

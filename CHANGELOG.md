@@ -27,6 +27,14 @@ All notable changes to SparkDistill are documented here. The format follows
   keeps the pins and Python (uv) deps current. `tritonbench/` (vendored) is excluded from ruff.
 
 ### Fixed
+- **Malformed bundled TritonBench report crashed the attested no-GPU verifier**:
+  `eval.triton_bench.summary_scores` and `_quick_subset_composite` read a miner-controlled
+  report with bare `.get` / `float()` calls, so a non-list `details`, a non-object details row,
+  or a non-numeric `composite_score` / `avg_composite` raised `AttributeError`, `TypeError`, or
+  an unlabelled `ValueError` straight out of `verify_tritonbench_report` → `verify_submission`,
+  killing the `Training track gate` job instead of rejecting the bundle. Both readers now fail
+  closed with a described `ValueError`, and `verify_tritonbench_report` turns it into a normal
+  rejection issue.
 - **`serve_stack._gpu_architecture` `UnboundLocalError` on the auto-detect path**: when
   `SPARKDISTILL_GPU_ARCHITECTURE` was unset and `nvidia-smi` succeeded, `normalize_gpu_architecture`
   was referenced but only imported inside the override branch (and `subprocess` only inside the

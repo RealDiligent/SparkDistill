@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
@@ -90,6 +91,21 @@ def detect_gpu_architecture() -> GpuArchitecture | None:
     return normalize_gpu_architecture(name)
 
 
+def _report_float(value: object, field: str) -> float:
+    """Coerce a report metric, rejecting the shapes `float()` chokes on.
+
+    A bundled TritonBench report is miner-controlled, so every numeric read here
+    must fail closed with the `ValueError` callers handle: `float(None)` raised
+    `TypeError` and `float("high")` raised a bare `ValueError` with no field name,
+    either of which escaped `verify_tritonbench_report` and killed the gate.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"tritonbench report {field} must be a number, got {type(value).__name__}")
+    if not math.isfinite(value):
+        raise ValueError(f"tritonbench report {field} must be finite, got {value!r}")
+    return float(value)
+
+
 def _quick_subset_composite(report: dict) -> float | None:
     """Average composite over the quick-run problem subset (level 1 + bugfix).
 
@@ -97,10 +113,15 @@ def _quick_subset_composite(report: dict) -> float | None:
     (e.g. a bare summary), in which case callers fall back to the headline.
     """
     details = report.get("details") or []
+    if not isinstance(details, list):
+        raise ValueError(f"tritonbench report details must be a list, got {type(details).__name__}")
+    non_objects = [type(row).__name__ for row in details if not isinstance(row, dict)]
+    if non_objects:
+        raise ValueError(f"tritonbench report details rows must be objects, got {sorted(set(non_objects))}")
     quick = [r for r in details if r.get("level") in _QUICK_PROBLEM_LEVELS]
     if not quick:
         return None
-    return sum(float(r.get("composite_score", 0.0)) for r in quick) / len(quick)
+    return sum(_report_float(r.get("composite_score", 0.0), "composite_score") for r in quick) / len(quick)
 
 
 def summary_scores(report: dict) -> dict[str, float]:
@@ -112,14 +133,16 @@ def summary_scores(report: dict) -> dict[str, float]:
     compares its level-1-only re-run against this, not the full-run headline.
     """
     summary = report.get("summary") or {}
-    headline = float(summary.get(HEADLINE_METRIC, 0.0))
+    if not isinstance(summary, dict):
+        raise ValueError(f"tritonbench report summary must be an object, got {type(summary).__name__}")
+    headline = _report_float(summary.get(HEADLINE_METRIC, 0.0), HEADLINE_METRIC)
     quick = _quick_subset_composite(report)
     return {
         "triton": headline,
         "triton_quick": headline if quick is None else quick,
-        "triton_exec_pass_rate": float(summary.get("exec_pass_rate", 0.0)),
-        "triton_correctness": float(summary.get("avg_correctness", 0.0)),
-        "triton_syntax_pass_rate": float(summary.get("syntax_pass_rate", 0.0)),
+        "triton_exec_pass_rate": _report_float(summary.get("exec_pass_rate", 0.0), "exec_pass_rate"),
+        "triton_correctness": _report_float(summary.get("avg_correctness", 0.0), "avg_correctness"),
+        "triton_syntax_pass_rate": _report_float(summary.get("syntax_pass_rate", 0.0), "syntax_pass_rate"),
     }
 
 
